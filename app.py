@@ -382,49 +382,58 @@ if "analysis_results" in st.session_state:
     st.markdown("---")
     st.header("Line-by-line Preparation (CV-focused)")
     # show each line card with QnA, sample answers and web notes
-    for item in results:
-        notes = item["notes"]
-        line = item["line"]
-        # card
-        with st.expander(f"🔎 {line}", expanded=False):
-            if isinstance(notes, dict) and notes.get("short_summary"):
-                st.markdown(f"**Summary:** {notes.get('short_summary')}")
-                st.markdown(f"**Detected domain:** {notes.get('domain','General')}")
-            elif isinstance(notes, dict) and notes.get("raw"):
-                st.markdown("**Raw model output:**")
-                st.write(notes.get("raw"))
-            else:
-                st.write(notes)
+    for idx, item in enumerate(results):  # ✅ Added enumerate to create a unique index for each loop
+    notes = item["notes"]
+    line = item["line"]
+    # card
+    with st.expander(f"🔎 {line}", expanded=False):
+        if isinstance(notes, dict) and notes.get("short_summary"):
+            st.markdown(f"**Summary:** {notes.get('short_summary')}")
+            st.markdown(f"**Detected domain:** {notes.get('domain','General')}")
+        elif isinstance(notes, dict) and notes.get("raw"):
+            st.markdown("**Raw model output:**")
+            st.write(notes.get("raw"))
+        else:
+            st.write(notes)
 
-            # study notes & web snippets
-            st.markdown("**Study notes (web-grounded)**")
-            study = notes.get("study_notes") if isinstance(notes, dict) else None
-            if study:
-                st.write(study)
-            if item.get("snippets"):
-                st.markdown("**Quick sources**")
-                for s in item["snippets"][:4]:
-                    if s.get("url"):
-                        st.markdown(f"- [{s.get('title')}]({s.get('url')}) — {s.get('snippet')[:180]}")
+        # study notes & web snippets
+        st.markdown("**Study notes (web-grounded)**")
+        study = notes.get("study_notes") if isinstance(notes, dict) else None
+        if study:
+            st.write(study)
+        if item.get("snippets"):
+            st.markdown("**Quick sources**")
+            for s in item["snippets"][:4]:
+                if s.get("url"):
+                    st.markdown(f"- [{s.get('title')}]({s.get('url')}) — {s.get('snippet')[:180]}")
 
-            # questions
-            if isinstance(notes, dict) and notes.get("questions"):
-                st.markdown("**Generated Questions & Sample Answers**")
-                for qobj in notes.get("questions"):
-                    q = qobj.get("q")
-                    typ = qobj.get("type", "general")
-                    ans = qobj.get("sample_answer", "")
-                    with st.container():
-                        st.markdown(f"<div class='q-card'><strong>Q ({typ}):</strong> {q}</div>", unsafe_allow_html=True)
-                        with st.expander("Show sample answer"):
-                            st.write(ans)
-            else:
-                # fallback: offer to generate quick mock questions
-                if st.button(f"Generate quick Qs for this line", key=f"gen_{line[:10]}"):
-                    prompt = prompt_generate_line_notes(line, context_jd=jd_text)
-                    messages = [{"role":"system","content":"You are an interview coach."},{"role":"user","content":prompt}]
-                    out, _ = call_openrouter_chat(messages, max_tokens=700, temperature=0.0)
-                    st.write(out)
+        # questions
+        if isinstance(notes, dict) and notes.get("questions"):
+            st.markdown("**Generated Questions & Sample Answers**")
+            for qobj in notes.get("questions"):
+                q = qobj.get("q")
+                typ = qobj.get("type", "general")
+                ans = qobj.get("sample_answer", "")
+                with st.container():
+                    st.markdown(f"<div class='q-card'><strong>Q ({typ}):</strong> {q}</div>", unsafe_allow_html=True)
+                    with st.expander("Show sample answer"):
+                        st.write(ans)
+        else:
+            # fallback: offer to generate quick mock questions
+            # ✅ FIX: Ensure unique key for each button by adding index
+            if st.button(f"Generate quick Qs for this line", key=f"gen_{idx}_{line[:10]}"):
+                prompt = prompt_generate_line_notes(line, context_jd=jd_text)
+                messages = [{"role": "system", "content": "You are an interview coach."},
+                            {"role": "user", "content": prompt}]
+                out, _ = call_openrouter_chat(messages, max_tokens=700, temperature=0.0)
+                st.write(out)
+
+"""
+CHANGES MADE:
+1. Added enumerate(results) to get a unique 'idx' for each loop iteration.
+2. Modified st.button key to include 'idx' → `key=f"gen_{idx}_{line[:10]}"` so keys are always unique.
+3. This prevents Streamlit's 'DuplicateWidgetID' error when `line[:10]` repeats.
+"""
 
     st.markdown("---")
     # Mock Interview (text-only)
