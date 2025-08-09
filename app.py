@@ -438,8 +438,8 @@ CHANGES MADE:
 
                
     # Mock Interview (text-only)
-    st.header("Mock Interview (text mode) — optional")
-    st.markdown("This mock interview uses the same CV-focused knowledge generated above. It will NOT change the initial JD–CV assessment.")
+st.header("Mock Interview (text mode) — optional")
+st.markdown("This mock interview uses the same CV-focused knowledge generated above. It will NOT change the initial JD–CV assessment.")
     if "mock_questions" not in st.session_state:
         st.session_state.mock_questions = []
         st.session_state.mock_idx = 0
