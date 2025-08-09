@@ -14,6 +14,7 @@ import re
 from io import BytesIO
 from typing import List, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urlparse
 
 import streamlit as st
 
@@ -193,6 +194,13 @@ def call_openrouter_chat(messages: list, max_tokens=1200, temperature=0.0):
     """Call OpenRouter chat completion endpoint with retries and fallback URLs.
     Returns (content, meta). On network errors, content is "" and meta contains {"error": str}.
     """
+    # incorporate runtime alternate base URL from sidebar if provided
+    alt_base = st.session_state.get("_alt_base_url")
+    urls = []
+    if alt_base:
+        base = alt_base[:-1] if alt_base.endswith("/") else alt_base
+        urls.append(f"{base}/v1/chat/completions")
+    urls.extend(OPENROUTER_CHAT_URLS)
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json"
@@ -204,7 +212,7 @@ def call_openrouter_chat(messages: list, max_tokens=1200, temperature=0.0):
         "temperature": temperature
     }
     last_err = None
-    for url in OPENROUTER_CHAT_URLS:
+    for url in urls:
         for attempt in range(3):
             try:
                 r = requests.post(url, headers=headers, json=payload, timeout=60)
@@ -248,6 +256,19 @@ def get_filtered_snippets(line: str, ddg_results_per_line: int) -> List[Dict[str
     queries_for_line += [f"{line} explanation", f"{line} tutorial", f"{line} examples"]
     all_snippets: List[Dict[str, Any]] = []
     seen_urls = set()
+    trusted_only = st.session_state.get("_trusted_domains_only", False)
+    allow_hosts = {
+        "wikipedia.org","docs.python.org","developer.mozilla.org","learn.microsoft.com","cloud.google.com","aws.amazon.com",
+        "kubernetes.io","pytorch.org","tensorflow.org","scikit-learn.org","matplotlib.org","pandas.pydata.org","numpy.org",
+        "oracle.com","postgresql.org","mysql.com","microsoft.com","github.com","docs.github.com","gitlab.com","bitbucket.org",
+        "fastapi.tiangolo.com","flask.palletsprojects.com","django-project.com","djangoproject.com","vuejs.org","react.dev","angular.io"
+    }
+    def host_allowed(u: str) -> bool:
+        try:
+            h = urlparse(u).hostname or ""
+            return any(h.endswith(d) for d in allow_hosts)
+        except Exception:
+            return False
     for q in queries_for_line[:4]:
         sr = cached_ddg_search(q, max_results=ddg_results_per_line)
         for r in sr:
@@ -257,6 +278,8 @@ def get_filtered_snippets(line: str, ddg_results_per_line: int) -> List[Dict[str
             if not url or url in seen_urls:
                 continue
             if not (is_english_text(title) and is_english_text(body)):
+                continue
+            if trusted_only and not host_allowed(url):
                 continue
             seen_urls.add(url)
             all_snippets.append({"title": title, "url": url, "snippet": body})
@@ -310,6 +333,56 @@ def prompt_generate_line_notes(line: str, context_jd: str = "") -> str:
     Keep JSON compact and machine-parseable. Tailor answers to be profession-agnostic but adapt when domain cues exist. If JD is provided, align answers to JD: {bool(context_jd)}.
     """) + f"\nCV_LINE: {line}\nJD_CONTEXT: {context_jd}"
 
+def _guess_label(line: str) -> str:
+    l = line.lower()
+    if any(k in l for k in ["b.sc", "bsc", "b.e", "btech", "bachelor", "ms", "msc", "m.s", "phd", "university", "degree", "gpa"]):
+        return "Education"
+    if any(k in l for k in ["intern", "engineer", "manager", "developer", "lead", "analyst", "experience", "worked", "responsible", "led", "managed", "built", "developed"]):
+        return "Work Experience"
+    if any(k in l for k in ["project", "capstone", "hackathon", "built", "designed", "implemented"]):
+        return "Project"
+    if any(k in l for k in ["aws", "gcp", "azure", "python", "java", "golang", "react", "node", "docker", "kubernetes"]):
+        return "Skill"
+    if any(k in l for k in ["certified", "certificate", "certification"]):
+        return "Certification"
+    return "Other"
+
+def _simple_summary(line: str) -> str:
+    s = line.strip()
+    if len(s) <= 200:
+        return s
+    parts = re.split(r"(?<=[\.!?])\s+", s)
+    return " ".join(parts[:2])
+
+def _local_questions(line: str) -> List[Dict[str, str]]:
+    base = line.strip()
+    return [
+        {"q": f"Walk me through the context and your contribution in: '{base}'.", "type": "behavioral", "sample_answer": "I describe the problem, my role, key actions, and measurable results in 3-4 sentences."},
+        {"q": f"What were the main technical decisions or trade-offs in: '{base}'?", "type": "technical", "sample_answer": "I outline 2-3 decisions, pros/cons, why we chose one, and the impact."},
+        {"q": f"If you had to improve '{base}' with 2 changes, what would they be and why?", "type": "followup", "sample_answer": "I propose two improvements, explain rationale, risks, and expected gains."},
+    ]
+
+def _local_notes(line: str, jd_text: str) -> Dict[str, Any]:
+    label = _guess_label(line)
+    return {
+        "line": line,
+        "label": label,
+        "short_summary": _simple_summary(line),
+        "domain": "General",
+        "questions": _local_questions(line),
+        "study_notes": [
+            "Clarify problem, actions, results (use numbers).",
+            "List 3 key terms and define each in one sentence.",
+            "Prepare 1 failure and 1 success story around this line.",
+        ],
+        "search_queries": [
+            f"{line} explanation",
+            f"{line} best practices",
+            f"{line} common pitfalls",
+            f"{line} interview questions",
+        ],
+    }
+
 # Restore missing prompt helpers
 
 def prompt_generate_assessment(cv_text: str, jd_text: str) -> str:
@@ -354,6 +427,17 @@ ddg_results_per_line = st.sidebar.slider("Web snippets per line", 0, 6, 3)
 temperature = st.sidebar.slider("Model creativity (temperature)", 0.0, 1.0, 0.0)
 parallel_workers = st.sidebar.slider("Parallel workers", 1, 8, 4)
 max_tokens_per_line = st.sidebar.slider("Max tokens per line", 300, 1600, 700, step=50)
+disable_web = st.sidebar.checkbox("Disable web search", value=False)
+trusted_only = st.sidebar.checkbox("Trusted domains only (web)", value=True)
+alt_base = st.sidebar.text_input("Alternate OpenRouter Base URL", value=os.environ.get("OPENROUTER_BASE_URL", ""))
+diagnostics = st.sidebar.checkbox("Diagnostics (show raw/errors)", value=False)
+local_mode = st.sidebar.checkbox("Local/offline mode (no API calls)", value=False)
+st.session_state["_alt_base_url"] = alt_base.strip() or None
+st.session_state["_trusted_domains_only"] = trusted_only
+st.session_state["_diagnostics"] = diagnostics
+st.session_state["_local_mode"] = local_mode
+if disable_web:
+    ddg_results_per_line = 0
 
 # File upload area
 st.header("1) Upload CV (PDF) — primary input")
@@ -401,7 +485,7 @@ if process_btn:
     st.session_state["jd_text"] = jd_text_area
 
     # 3) Produce initial assessment (if JD provided or if CV+JD mode)
-    if mode == "CV + JD (recommended)" and jd_text_area.strip():
+    if mode == "CV + JD (recommended)" and jd_text_area.strip() and not st.session_state.get("_local_mode"):
         st.info("Generating JD–CV initial assessment (strengths, gaps)...")
         prompt = prompt_generate_assessment(cv_text, jd_text_area)
         messages = [
@@ -413,6 +497,8 @@ if process_btn:
         if isinstance(raw, dict) and raw.get("error"):
             st.error("Cannot reach OpenRouter. Please check your Internet/DNS, or set OPENROUTER_BASE_URL / proxy env. Skipping assessment.")
             st.session_state.initial_assessment = None
+            if diagnostics:
+                st.code(raw.get("error"))
         else:
             try:
                 parsed = try_load_json(out)
@@ -430,26 +516,34 @@ if process_btn:
     total = len(candidate_lines)
 
     def process_line(line: str) -> Dict[str, Any]:
-        snippets: List[Dict[str, Any]] = []
-        if ddg_results_per_line > 0 and (ddg is not None or _DDG_CLIENT is not None):
-            snippets = get_filtered_snippets(line, ddg_results_per_line)
-        prompt = prompt_generate_line_notes(line, context_jd=jd_text_area if jd_text_area.strip() else "")
-        messages = [
-            {"role":"system", "content": "You are an expert interview coach, researcher and note writer. Provide concise JSON in English only."},
-            {"role":"user", "content": prompt},
-        ]
-        if snippets:
-            context_msg = {"role":"user", "content": "Web snippets (for context, English): " + json.dumps(snippets[:3], indent=2)}
-            messages.append(context_msg)
-        out, raw = call_openrouter_chat(messages, max_tokens=max_tokens_per_line, temperature=temperature)
-        if isinstance(raw, dict) and raw.get("error"):
-            parsed = {"line": line, "error": "Service temporarily unavailable. Please retry.", "sources": snippets}
+        if st.session_state.get("_local_mode"):
+            # offline/local deterministic notes
+            snippets: List[Dict[str, Any]] = []
+            if ddg_results_per_line > 0 and (ddg is not None or _DDG_CLIENT is not None):
+                snippets = get_filtered_snippets(line, ddg_results_per_line)
+            return {"line": line, "notes": _local_notes(line, jd_text_area), "snippets": snippets}
         else:
-            try:
-                parsed = try_load_json(out)
-            except Exception:
-                parsed = {"line": line, "raw": out, "sources": snippets}
-        return {"line": line, "notes": parsed, "snippets": snippets}
+            snippets = []
+            if ddg_results_per_line > 0 and (ddg is not None or _DDG_CLIENT is not None):
+                snippets = get_filtered_snippets(line, ddg_results_per_line)
+            prompt = prompt_generate_line_notes(line, context_jd=jd_text_area if jd_text_area.strip() else "")
+            messages = [
+                {"role":"system", "content": "You are an expert interview coach, researcher and note writer. Provide concise JSON in English only."},
+                {"role":"user", "content": prompt},
+            ]
+            if snippets:
+                context_msg = {"role":"user", "content": "Web snippets (for context, English): " + json.dumps(snippets[:3], indent=2)}
+                messages.append(context_msg)
+            out, raw = call_openrouter_chat(messages, max_tokens=max_tokens_per_line, temperature=temperature)
+            if isinstance(raw, dict) and raw.get("error"):
+                parsed = _local_notes(line, jd_text_area)
+                parsed["warning"] = "LLM unavailable; using local offline notes."
+            else:
+                try:
+                    parsed = try_load_json(out)
+                except Exception:
+                    parsed = {"line": line, "raw": out, "sources": snippets}
+            return {"line": line, "notes": parsed, "snippets": snippets}
 
     # Run in parallel
     with ThreadPoolExecutor(max_workers=parallel_workers) as ex:
@@ -515,6 +609,9 @@ if "analysis_results" in st.session_state:
                 st.write(notes.get("raw"))
             elif isinstance(notes, dict) and notes.get("error"):
                 st.warning(notes.get("error"))
+            if st.session_state.get("_diagnostics"):
+                st.caption("Diagnostics")
+                st.json(notes)
             else:
                 st.write(notes)
 
@@ -548,7 +645,10 @@ if "analysis_results" in st.session_state:
                                 {"role": "user", "content": prompt}]
                     out, meta = call_openrouter_chat(messages, max_tokens=700, temperature=0.0)
                     if isinstance(meta, dict) and meta.get("error"):
-                        st.error("Service temporarily unavailable. Please check connectivity and try again.")
+                        # local fallback
+                        local_qs = _local_questions(line)
+                        st.info("LLM unavailable; using local quick questions:")
+                        st.json(local_qs)
                     else:
                         st.write(out)
                     st.markdown("---")
@@ -564,36 +664,57 @@ if "mock_questions" not in st.session_state:
 if st.button("Generate Mock Interview Questions (8)"):
     _cv_text = st.session_state.get("cv_text", "")
     _jd_text = st.session_state.get("jd_text", "")
-    prompt = textwrap.dedent(f"""
-    You are an interviewer. ENGLISH ONLY. Generate 8 crisp questions (mix of scenario, technical, behavioral, follow-ups).
-    Keep each 'ideal_points' list short and concrete.
-    Return a JSON array where each item is: {{ "q": "...", "category": "...", "ideal_points": ["..."] }}
+    if st.session_state.get("_local_mode"):
+        # generate local mock questions from top lines
+        basis = st.session_state.get("candidate_lines", [])[:8]
+        qs = [q["q"] for line in basis for q in _local_questions(line)][:8] or [
+            "Tell me about your most impactful project.",
+            "What technical challenge did you solve recently?",
+            "How do you handle ambiguity at work?",
+            "Describe a failure and what you learned.",
+            "How do you ensure code quality and reliability?",
+            "Give an example of optimizing performance.",
+            "How do you prioritize tasks under deadlines?",
+            "What would you do differently in your last role?",
+        ]
+        st.session_state.mock_questions = qs
+        st.session_state.mock_idx = 0
+        st.success("Mock questions (local) generated. Use the panel below to answer and get feedback.")
+    else:
+        prompt = textwrap.dedent(f"""
+        You are an interviewer. ENGLISH ONLY. Generate 8 crisp questions (mix of scenario, technical, behavioral, follow-ups).
+        Keep each 'ideal_points' list short and concrete.
+        Return a JSON array where each item is: {{ "q": "...", "category": "...", "ideal_points": ["..."] }}
 
-    CV:
-    {_cv_text}
+        CV:
+        {_cv_text}
 
-    JD:
-    {_jd_text}
-    """)
-    messages = [{"role":"system","content":"You are an interviewer."},{"role":"user","content":prompt}]
-    out, meta = call_openrouter_chat(messages, max_tokens=900, temperature=0.2)
-    if isinstance(meta, dict) and meta.get("error"):
-        st.error("Service temporarily unavailable. Please check connectivity and try again.")
-        st.stop()
-    
-    # try parse array
-    try:
-        parsed = try_load_json(out)
-        if isinstance(parsed, list):
-            qs = [p.get("q") if isinstance(p, dict) else str(p) for p in parsed]
+        JD:
+        {_jd_text}
+        """)
+        messages = [{"role":"system","content":"You are an interviewer."},{"role":"user","content":prompt}]
+        out, meta = call_openrouter_chat(messages, max_tokens=900, temperature=0.2)
+        if isinstance(meta, dict) and meta.get("error"):
+            # local fallback
+            basis = st.session_state.get("candidate_lines", [])[:8]
+            qs = [q["q"] for line in basis for q in _local_questions(line)][:8]
+            st.session_state.mock_questions = qs
+            st.session_state.mock_idx = 0
+            st.info("LLM unavailable; generated local mock questions.")
         else:
-            raise ValueError("Not a list")
-    except Exception:
-        # fallback: split lines
-        qs = [line.strip() for line in out.splitlines() if line.strip()][:8]
-    st.session_state.mock_questions = qs
-    st.session_state.mock_idx = 0
-    st.success("Mock questions generated. Use the panel below to answer and get feedback.")
+            # try parse array
+            try:
+                parsed = try_load_json(out)
+                if isinstance(parsed, list):
+                    qs = [p.get("q") if isinstance(p, dict) else str(p) for p in parsed]
+                else:
+                    raise ValueError("Not a list")
+            except Exception:
+                # fallback: split lines
+                qs = [line.strip() for line in out.splitlines() if line.strip()][:8]
+            st.session_state.mock_questions = qs
+            st.session_state.mock_idx = 0
+            st.success("Mock questions generated. Use the panel below to answer and get feedback.")
 
 if st.session_state.mock_questions:
     idx = st.session_state.mock_idx
