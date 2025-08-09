@@ -451,51 +451,51 @@ if st.button("Generate Mock Interview Questions (8)"):
     out, _ = call_openrouter_chat(messages, max_tokens=900, temperature=0.2)
        
     # try parse array
-        try:
-            parsed = json.loads(out)
-            qs = [p.get("q") if isinstance(p, dict) else str(p) for p in parsed]
-        except Exception:
-            # fallback: split lines
-            qs = [line.strip() for line in out.splitlines() if line.strip()][:8]
-        st.session_state.mock_questions = qs
-        st.session_state.mock_idx = 0
-        st.success("Mock questions generated. Use the panel below to answer and get feedback.")
+    try:
+        parsed = json.loads(out)
+        qs = [p.get("q") if isinstance(p, dict) else str(p) for p in parsed]
+    except Exception:
+         # fallback: split lines
+        qs = [line.strip() for line in out.splitlines() if line.strip()][:8]
+    st.session_state.mock_questions = qs
+    st.session_state.mock_idx = 0
+    st.success("Mock questions generated. Use the panel below to answer and get feedback.")
 
-    if st.session_state.mock_questions:
-        idx = st.session_state.mock_idx
-        if idx < len(st.session_state.mock_questions):
-            st.markdown(f"**Q{idx+1}:** {st.session_state.mock_questions[idx]}")
-            user_answer = st.text_area("Your answer (type here)", key=f"mock_ans_{idx}", height=160)
-            if st.button("Get feedback on this answer"):
+if st.session_state.mock_questions:
+    idx = st.session_state.mock_idx
+    if idx < len(st.session_state.mock_questions):
+        st.markdown(f"**Q{idx+1}:** {st.session_state.mock_questions[idx]}")
+        user_answer = st.text_area("Your answer (type here)", key=f"mock_ans_{idx}", height=160)
+        if st.button("Get feedback on this answer"):
                 # feed LLM: provide initial assessment + line notes context for better feedback
-                context = {"initial_assessment": st.session_state.get("initial_assessment"), "top_lines": [r["line"] for r in results[:6]]}
-                fb_prompt = textwrap.dedent(f"""
-                You are an interviewer and feedback coach. Use the candidate context and initial assessment to give constructive feedback.
-                Context (JSON): {json.dumps(context, indent=2)}
-                Question: {st.session_state.mock_questions[idx]}
-                Candidate answer: {user_answer}
+            context = {"initial_assessment": st.session_state.get("initial_assessment"), "top_lines": [r["line"] for r in results[:6]]}
+            fb_prompt = textwrap.dedent(f"""
+            You are an interviewer and feedback coach. Use the candidate context and initial assessment to give constructive feedback.
+            Context (JSON): {json.dumps(context, indent=2)}
+            Question: {st.session_state.mock_questions[idx]}
+            Candidate answer: {user_answer}
 
-                Provide:
-                1) Short strengths of this answer (bulleted)
-                2) Weaknesses / missing points (bulleted)
-                3) How to improve (step-by-step)
-                4) A model improved answer (2-3 short paragraphs)
-                """)
-                messages = [{"role":"system","content":"You are a helpful interviewer who gives actionable feedback."},{"role":"user","content":fb_prompt}]
-                fb, _ = call_openrouter_chat(messages, max_tokens=900, temperature=0.0)
-                st.markdown("**Feedback:**")
-                st.write(fb)
-                st.session_state.mock_history.append({"q": st.session_state.mock_questions[idx], "answer": user_answer, "feedback": fb})
-                st.session_state.mock_idx += 1
-        else:
-            st.success("Mock interview complete! You can regenerate or download history.")
-            if st.session_state.mock_history:
-                st.download_button("Download mock history (JSON)", json.dumps(st.session_state.mock_history, indent=2), file_name="mock_history.json")
+            Provide:
+            1) Short strengths of this answer (bulleted)
+            2) Weaknesses / missing points (bulleted)
+            3) How to improve (step-by-step)
+            4) A model improved answer (2-3 short paragraphs)
+            """)
+            messages = [{"role":"system","content":"You are a helpful interviewer who gives actionable feedback."},{"role":"user","content":fb_prompt}]
+            fb, _ = call_openrouter_chat(messages, max_tokens=900, temperature=0.0)
+            st.markdown("**Feedback:**")
+            st.write(fb)
+            st.session_state.mock_history.append({"q": st.session_state.mock_questions[idx], "answer": user_answer, "feedback": fb})
+            st.session_state.mock_idx += 1
+    else:
+        st.success("Mock interview complete! You can regenerate or download history.")
+        if st.session_state.mock_history:
+            st.download_button("Download mock history (JSON)", json.dumps(st.session_state.mock_history, indent=2), file_name="mock_history.json")
 
-    st.markdown("---")
+st.markdown("---")
     # Exports
-    st.header("Export / Download")
-    if st.button("Download all notes (JSON)"):
-        st.download_button("Download notes JSON", json.dumps(results, indent=2), file_name="cv_notes.json")
+st.header("Export / Download")
+if st.button("Download all notes (JSON)"):
+    st.download_button("Download notes JSON", json.dumps(results, indent=2), file_name="cv_notes.json")
     st.markdown("<footer>Built with ♥ — model: deepseek/deepseek-r1-0528:free via OpenRouter. Keep your API key secure in st.secrets.</footer>", unsafe_allow_html=True)
 
