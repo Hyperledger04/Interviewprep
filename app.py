@@ -440,16 +440,17 @@ CHANGES MADE:
     # Mock Interview (text-only)
 st.header("Mock Interview (text mode) — optional")
 st.markdown("This mock interview uses the same CV-focused knowledge generated above. It will NOT change the initial JD–CV assessment.")
-    if "mock_questions" not in st.session_state:
-        st.session_state.mock_questions = []
-        st.session_state.mock_idx = 0
-        st.session_state.mock_history = []
+if "mock_questions" not in st.session_state:
+    st.session_state.mock_questions = []
+    st.session_state.mock_idx = 0
+    st.session_state.mock_history = []
 
-    if st.button("Generate Mock Interview Questions (8)"):
-        prompt = prompt_generate_mock_questions(cv_text, jd_text, n=8)
-        messages = [{"role":"system","content":"You are an interviewer."},{"role":"user","content":prompt}]
-        out, _ = call_openrouter_chat(messages, max_tokens=900, temperature=0.2)
-        # try parse array
+if st.button("Generate Mock Interview Questions (8)"):
+    prompt = prompt_generate_mock_questions(cv_text, jd_text, n=8)
+    messages = [{"role":"system","content":"You are an interviewer."},{"role":"user","content":prompt}]
+    out, _ = call_openrouter_chat(messages, max_tokens=900, temperature=0.2)
+       
+    # try parse array
         try:
             parsed = json.loads(out)
             qs = [p.get("q") if isinstance(p, dict) else str(p) for p in parsed]
