@@ -1,4 +1,6 @@
 streamlit
-requests
 python-dotenv
+requests
+duckduckgo-search
 PyPDF2
+pymupdf
