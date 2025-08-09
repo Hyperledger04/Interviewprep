@@ -427,6 +427,7 @@ if "analysis_results" in st.session_state:
                             {"role": "user", "content": prompt}]
                 out, _ = call_openrouter_chat(messages, max_tokens=700, temperature=0.0)
                 st.write(out)
+                st.markdown("---")
 
 """
 CHANGES MADE:
@@ -435,7 +436,7 @@ CHANGES MADE:
 3. This prevents Streamlit's 'DuplicateWidgetID' error when `line[:10]` repeats.
 """
 
-    st.markdown("---")
+               
     # Mock Interview (text-only)
     st.header("Mock Interview (text mode) — optional")
     st.markdown("This mock interview uses the same CV-focused knowledge generated above. It will NOT change the initial JD–CV assessment.")
