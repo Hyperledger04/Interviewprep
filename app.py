@@ -13,6 +13,7 @@ import requests
 import re
 from io import BytesIO
 from typing import List, Dict, Any
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import streamlit as st
 
@@ -115,6 +116,30 @@ OPENROUTER_CHAT_URLS += [
 # Helper functions
 # ---------------------------
 
+@st.cache_data(show_spinner=False)
+def cached_ddg_search(query: str, max_results: int = 4) -> List[Dict[str, Any]]:
+    return ddg_search_snippets.__wrapped__(query, max_results)  # type: ignore
+
+def is_english_text(text: str) -> bool:
+    if not text:
+        return True
+    # Heuristic: high ratio of ASCII letters and spaces
+    ascii_chars = sum(1 for c in text if ord(c) < 128)
+    ratio = ascii_chars / max(len(text), 1)
+    return ratio > 0.9
+
+_STOPWORDS = set("the a an and or for with from in on at to of by as is are was were be been being this that those these it its their our your you we they i my his her him she he them us using use used built built".split())
+
+def extract_keywords(line: str) -> List[str]:
+    tokens = re.findall(r"[A-Za-z][A-Za-z0-9_\-]{2,}", line.lower())
+    return [t for t in tokens if len(t) >= 4 and t not in _STOPWORDS]
+
+def score_result(res: Dict[str, Any], keywords: List[str]) -> int:
+    title = (res.get("title") or "").lower()
+    body = (res.get("body") or "").lower()
+    text = title + " " + body
+    return sum(1 for k in keywords if k in text)
+
 def extract_text_from_pdf_bytes(pdf_bytes: bytes) -> str:
     """Extract text from PDF bytes with fallback."""
     text = ""
@@ -201,12 +226,12 @@ def ddg_search_snippets(query: str, max_results: int = 4):
     try:
         # legacy simple API
         if ddg is not None:
-            results = ddg(query, max_results=max_results)
+            results = ddg(query + " english", max_results=max_results)
             return results or []
         # modern DDGS client fallback
         if _DDG_CLIENT is not None:
             hits = []
-            for r in _DDG_CLIENT.text(query, max_results=max_results):
+            for r in _DDG_CLIENT.text(query + " english", region="us-en", safesearch="moderate", max_results=max_results):
                 hits.append({
                     "title": r.get("title"),
                     "href": r.get("href") or r.get("url"),
@@ -216,6 +241,28 @@ def ddg_search_snippets(query: str, max_results: int = 4):
         return []
     except Exception:
         return []
+
+def get_filtered_snippets(line: str, ddg_results_per_line: int) -> List[Dict[str, Any]]:
+    keywords = extract_keywords(line)
+    queries_for_line = [line]
+    queries_for_line += [f"{line} explanation", f"{line} tutorial", f"{line} examples"]
+    all_snippets: List[Dict[str, Any]] = []
+    seen_urls = set()
+    for q in queries_for_line[:4]:
+        sr = cached_ddg_search(q, max_results=ddg_results_per_line)
+        for r in sr:
+            url = r.get("href") or r.get("url")
+            title = r.get("title") or ""
+            body = r.get("body") or ""
+            if not url or url in seen_urls:
+                continue
+            if not (is_english_text(title) and is_english_text(body)):
+                continue
+            seen_urls.add(url)
+            all_snippets.append({"title": title, "url": url, "snippet": body})
+    # sort by simple relevance score
+    all_snippets.sort(key=lambda x: score_result({"title": x["title"], "body": x["snippet"]}, keywords), reverse=True)
+    return all_snippets[: min(len(all_snippets), max(1, ddg_results_per_line))]
 
 # Robust JSON extraction from possibly noisy LLM output
 _def_fence_re = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
@@ -252,13 +299,13 @@ def try_load_json(text: str):
 def prompt_generate_line_notes(line: str, context_jd: str = "") -> str:
     # structured instruction to produce JSON for a CV line
     return textwrap.dedent(f"""
-    You are an expert interview coach and researcher. Given a single line from a candidate's CV, produce a JSON object with keys:
+    You are an expert interview coach and researcher. Answer in ENGLISH ONLY. Use simple, crisp sentences. Given a single line from a candidate's CV, produce a JSON object with keys:
     - 'line': original line
     - 'label': short label/category (e.g., Work Experience, Education, Project, Skill, Certification)
-    - 'short_summary': one-paragraph summary explaining the line in simple terms
+    - 'short_summary': 2-4 short sentences explaining the line in simple terms
     - 'domain': detected industry/domain (e.g., law, software, marketing) inferred from the line
-    - 'questions': array of question objects with 'q' (question), 'type' (technical/behavioral/scenario/followup), and 'sample_answer' (2-3 paragraph model answer that shows deep understanding)
-    - 'study_notes': short web-grounded notes (definitions, key points, steps to revise) suitable for last-minute reading
+    - 'questions': array of question objects with 'q' (question), 'type' (technical/behavioral/scenario/followup), and 'sample_answer' (3-6 crisp sentences showing real understanding; avoid long paragraphs)
+    - 'study_notes': concise bullets (web-grounded): definitions, key points, steps to revise (English only)
     - 'search_queries': list of 4 concise web search queries that would help learn more about this line
     Keep JSON compact and machine-parseable. Tailor answers to be profession-agnostic but adapt when domain cues exist. If JD is provided, align answers to JD: {bool(context_jd)}.
     """) + f"\nCV_LINE: {line}\nJD_CONTEXT: {context_jd}"
@@ -283,13 +330,9 @@ def prompt_generate_assessment(cv_text: str, jd_text: str) -> str:
 
 def prompt_generate_mock_questions(cv_text: str, jd_text: str, n:int=8) -> str:
     return textwrap.dedent(f"""
-    You are an interviewer. From the CV below (and JD if given), generate {n} interview questions across categories:
-    - scenario-based (STAR)
-    - technical/domain-specific
-    - culture-fit & behavioral
-    - follow-ups for deeper probing
-
-    For each question, return a JSON array item: {{ "q": "...", "category": "...", "ideal_points": ["bullet points of what a strong answer should include"] }}
+    You are an interviewer. ENGLISH ONLY. Generate 8 crisp questions (mix of scenario, technical, behavioral, follow-ups).
+    Keep each 'ideal_points' list short and concrete.
+    Return a JSON array where each item is: {{ "q": "...", "category": "...", "ideal_points": ["..."] }}
 
     CV:
     {cv_text}
@@ -309,6 +352,8 @@ analyze_all_lines = st.sidebar.checkbox("Analyze all parsed lines", value=False)
 max_lines = st.sidebar.slider("Max CV lines to analyze", 3, 400, 30)
 ddg_results_per_line = st.sidebar.slider("Web snippets per line", 0, 6, 3)
 temperature = st.sidebar.slider("Model creativity (temperature)", 0.0, 1.0, 0.0)
+parallel_workers = st.sidebar.slider("Parallel workers", 1, 8, 4)
+max_tokens_per_line = st.sidebar.slider("Max tokens per line", 300, 1600, 700, step=50)
 
 # File upload area
 st.header("1) Upload CV (PDF) — primary input")
@@ -380,42 +425,23 @@ if process_btn:
         st.info("No JD provided or CV-only mode: skipping JD–CV assessment.")
 
     # 4) For each candidate line: generate notes + qna + web snippets
-    results = []
+    results: List[Dict[str, Any]] = []
     progress = st.progress(0)
     total = len(candidate_lines)
-    for i, line in enumerate(candidate_lines, start=1):
-        st.markdown(f"<div class='card'><strong>Processing line {i}/{total}:</strong> {line}</div>", unsafe_allow_html=True)
-        # 4a: web snippets
-        snippets = []
-        if ddg_results_per_line > 0:
-            queries_for_line = [line]
-            # add small variants for searching
-            queries_for_line += [
-                f"{line} explanation",
-                f"{line} tutorial",
-                f"{line} examples"
-            ]
-            for q in queries_for_line[:4]:
-                if ddg is None and _DDG_CLIENT is None:
-                    break
-                sr = ddg_search_snippets(q, max_results=ddg_results_per_line)
-                for r in sr:
-                    snippets.append({"title": r.get("title"), "url": r.get("href") or r.get("url"), "snippet": r.get("body")})
-                time.sleep(0.1)
 
-        # 4b: prepare LLM prompt for this line
+    def process_line(line: str) -> Dict[str, Any]:
+        snippets: List[Dict[str, Any]] = []
+        if ddg_results_per_line > 0 and (ddg is not None or _DDG_CLIENT is not None):
+            snippets = get_filtered_snippets(line, ddg_results_per_line)
         prompt = prompt_generate_line_notes(line, context_jd=jd_text_area if jd_text_area.strip() else "")
         messages = [
-            {"role":"system", "content": "You are an expert interview coach, researcher and note writer. Provide concise JSON."},
+            {"role":"system", "content": "You are an expert interview coach, researcher and note writer. Provide concise JSON in English only."},
             {"role":"user", "content": prompt},
         ]
-        # include snippet context in an extra user message if present to ground answers
         if snippets:
-            context_msg = {"role":"user", "content": "Web snippets (for context): " + json.dumps(snippets[:3], indent=2)}
+            context_msg = {"role":"user", "content": "Web snippets (for context, English): " + json.dumps(snippets[:3], indent=2)}
             messages.append(context_msg)
-
-        out, raw = call_openrouter_chat(messages, max_tokens=1400, temperature=temperature)
-        # try parse JSON; if fails, return raw wrapped
+        out, raw = call_openrouter_chat(messages, max_tokens=max_tokens_per_line, temperature=temperature)
         if isinstance(raw, dict) and raw.get("error"):
             parsed = {"line": line, "error": "Service temporarily unavailable. Please retry.", "sources": snippets}
         else:
@@ -423,10 +449,22 @@ if process_btn:
                 parsed = try_load_json(out)
             except Exception:
                 parsed = {"line": line, "raw": out, "sources": snippets}
+        return {"line": line, "notes": parsed, "snippets": snippets}
 
-        results.append({"line": line, "notes": parsed, "snippets": snippets})
-        progress.progress(int(i/total*100))
-        time.sleep(0.5)
+    # Run in parallel
+    with ThreadPoolExecutor(max_workers=parallel_workers) as ex:
+        future_map = {ex.submit(process_line, line): i for i, line in enumerate(candidate_lines, start=1)}
+        done_count = 0
+        for fut in as_completed(future_map):
+            done_count += 1
+            i = future_map[fut]
+            try:
+                res = fut.result()
+                results.append(res)
+                st.markdown(f"<div class='card'><strong>Processed line {i}/{total}:</strong> {res['line']}</div>", unsafe_allow_html=True)
+            except Exception as e:
+                st.warning(f"Failed to process a line: {e}")
+            progress.progress(int(done_count/total*100))
 
     st.session_state["analysis_results"] = results
     st.success("Line-by-line notes generated. Scroll down to review.")
@@ -526,7 +564,17 @@ if "mock_questions" not in st.session_state:
 if st.button("Generate Mock Interview Questions (8)"):
     _cv_text = st.session_state.get("cv_text", "")
     _jd_text = st.session_state.get("jd_text", "")
-    prompt = prompt_generate_mock_questions(_cv_text, _jd_text, n=8)
+    prompt = textwrap.dedent(f"""
+    You are an interviewer. ENGLISH ONLY. Generate 8 crisp questions (mix of scenario, technical, behavioral, follow-ups).
+    Keep each 'ideal_points' list short and concrete.
+    Return a JSON array where each item is: {{ "q": "...", "category": "...", "ideal_points": ["..."] }}
+
+    CV:
+    {_cv_text}
+
+    JD:
+    {_jd_text}
+    """)
     messages = [{"role":"system","content":"You are an interviewer."},{"role":"user","content":prompt}]
     out, meta = call_openrouter_chat(messages, max_tokens=900, temperature=0.2)
     if isinstance(meta, dict) and meta.get("error"):
