@@ -10,6 +10,7 @@ import json
 import time
 import textwrap
 import requests
+import re
 from io import BytesIO
 from typing import List, Dict, Any
 
@@ -31,6 +32,11 @@ try:
     from duckduckgo_search import ddg
 except Exception:
     ddg = None
+try:
+    from duckduckgo_search import DDGS  # modern API fallback
+    _DDG_CLIENT = DDGS()
+except Exception:
+    _DDG_CLIENT = None
 
 # ---------------------------
 # Configuration & secrets
@@ -170,13 +176,57 @@ def call_openrouter_chat(messages: list, max_tokens=1200, temperature=0.0):
         return f"[ERROR] {e}", None
 
 def ddg_search_snippets(query: str, max_results: int = 4):
-    if ddg is None:
+    if ddg is None and _DDG_CLIENT is None:
         return []
     try:
-        results = ddg(query, max_results=max_results)
-        return results or []
+        # legacy simple API
+        if ddg is not None:
+            results = ddg(query, max_results=max_results)
+            return results or []
+        # modern DDGS client fallback
+        if _DDG_CLIENT is not None:
+            hits = []
+            for r in _DDG_CLIENT.text(query, max_results=max_results):
+                hits.append({
+                    "title": r.get("title"),
+                    "href": r.get("href") or r.get("url"),
+                    "body": r.get("body")
+                })
+            return hits
+        return []
     except Exception:
         return []
+
+# Robust JSON extraction from possibly noisy LLM output
+_def_fence_re = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
+
+def _extract_json_snippet(text: str) -> str:
+    if not text:
+        return ""
+    m = _def_fence_re.search(text)
+    if m:
+        return m.group(1).strip()
+    # try object first
+    start = text.find('{')
+    end = text.rfind('}')
+    if start != -1 and end != -1 and end > start:
+        return text[start:end+1]
+    # then array
+    start = text.find('[')
+    end = text.rfind(']')
+    if start != -1 and end != -1 and end > start:
+        return text[start:end+1]
+    return text
+
+def try_load_json(text: str):
+    try:
+        return json.loads(text)
+    except Exception:
+        snippet = _extract_json_snippet(text)
+        try:
+            return json.loads(snippet)
+        except Exception:
+            raise
 
 # Prompt templates
 def prompt_generate_line_notes(line: str, context_jd: str = "") -> str:
@@ -233,7 +283,8 @@ st.sidebar.title("Settings & Keys")
 st.sidebar.caption("Model: deepseek/deepseek-r1-0528:free (OpenRouter).")
 
 mode = st.sidebar.selectbox("Mode", ["CV only", "CV + JD (recommended)"])
-max_lines = st.sidebar.slider("Max CV lines to analyze", 3, 40, 12)
+analyze_all_lines = st.sidebar.checkbox("Analyze all parsed lines", value=False)
+max_lines = st.sidebar.slider("Max CV lines to analyze", 3, 400, 30)
 ddg_results_per_line = st.sidebar.slider("Web snippets per line", 0, 6, 3)
 temperature = st.sidebar.slider("Model creativity (temperature)", 0.0, 1.0, 0.0)
 
@@ -273,8 +324,10 @@ if process_btn:
 
     # 2) Parse lines
     lines = split_lines_and_sections(cv_text)
-    # heuristic: pick lines containing verbs or bullets; keep top N
-    candidate_lines = [l for l in lines if len(l) > 12][:max_lines]
+    # heuristic: pick lines containing verbs or bullets; optionally cap N
+    candidate_lines = [l for l in lines if len(l) > 12]
+    if not analyze_all_lines:
+        candidate_lines = candidate_lines[:max_lines]
 
     st.session_state["cv_text"] = cv_text
     st.session_state["candidate_lines"] = candidate_lines
@@ -291,7 +344,7 @@ if process_btn:
         out, raw = call_openrouter_chat(messages, max_tokens=900, temperature=0.0)
         # store immutable
         try:
-            parsed = json.loads(out)
+            parsed = try_load_json(out)
             st.session_state.initial_assessment = parsed
         except Exception:
             # fallback: keep raw text if JSON parse fails
@@ -317,7 +370,7 @@ if process_btn:
                 f"{line} examples"
             ]
             for q in queries_for_line[:4]:
-                if ddg is None:
+                if ddg is None and _DDG_CLIENT is None:
                     break
                 sr = ddg_search_snippets(q, max_results=ddg_results_per_line)
                 for r in sr:
@@ -338,7 +391,7 @@ if process_btn:
         out, raw = call_openrouter_chat(messages, max_tokens=1400, temperature=temperature)
         # try parse JSON; if fails, return raw wrapped
         try:
-            parsed = json.loads(out)
+            parsed = try_load_json(out)
         except Exception:
             parsed = {"line": line, "raw": out, "sources": snippets}
 
@@ -382,61 +435,52 @@ if "analysis_results" in st.session_state:
     st.markdown("---")
     st.header("Line-by-line Preparation (CV-focused)")
     # show each line card with QnA, sample answers and web notes
-    for idx, item in enumerate(results):  # ✅ Added enumerate to create a unique index for each loop
+    for idx, item in enumerate(results):
         notes = item["notes"]
         line = item["line"]
-    # card
-    with st.expander(f"🔎 {line}", expanded=False):
-        if isinstance(notes, dict) and notes.get("short_summary"):
-            st.markdown(f"**Summary:** {notes.get('short_summary')}")
-            st.markdown(f"**Detected domain:** {notes.get('domain','General')}")
-        elif isinstance(notes, dict) and notes.get("raw"):
-            st.markdown("**Raw model output:**")
-            st.write(notes.get("raw"))
-        else:
-            st.write(notes)
+        # card
+        with st.expander(f"🔎 {line}", expanded=False):
+            if isinstance(notes, dict) and notes.get("short_summary"):
+                st.markdown(f"**Summary:** {notes.get('short_summary')}")
+                st.markdown(f"**Detected domain:** {notes.get('domain','General')}")
+            elif isinstance(notes, dict) and notes.get("raw"):
+                st.markdown("**Raw model output:**")
+                st.write(notes.get("raw"))
+            else:
+                st.write(notes)
 
-        # study notes & web snippets
-        st.markdown("**Study notes (web-grounded)**")
-        study = notes.get("study_notes") if isinstance(notes, dict) else None
-        if study:
-            st.write(study)
-        if item.get("snippets"):
-            st.markdown("**Quick sources**")
-            for s in item["snippets"][:4]:
-                if s.get("url"):
-                    st.markdown(f"- [{s.get('title')}]({s.get('url')}) — {s.get('snippet')[:180]}")
+            # study notes & web snippets
+            st.markdown("**Study notes (web-grounded)**")
+            study = notes.get("study_notes") if isinstance(notes, dict) else None
+            if study:
+                st.write(study)
+            if item.get("snippets"):
+                st.markdown("**Quick sources**")
+                for s in item["snippets"][:4]:
+                    if s.get("url"):
+                        st.markdown(f"- [{s.get('title')}]({s.get('url')}) — {s.get('snippet')[:180]}")
 
-        # questions
-        if isinstance(notes, dict) and notes.get("questions"):
-            st.markdown("**Generated Questions & Sample Answers**")
-            for qobj in notes.get("questions"):
-                q = qobj.get("q")
-                typ = qobj.get("type", "general")
-                ans = qobj.get("sample_answer", "")
-                with st.container():
-                    st.markdown(f"<div class='q-card'><strong>Q ({typ}):</strong> {q}</div>", unsafe_allow_html=True)
-                    with st.expander("Show sample answer"):
-                        st.write(ans)
-        else:
-            # fallback: offer to generate quick mock questions
-            # ✅ FIX: Ensure unique key for each button by adding index
-            if st.button(f"Generate quick Qs for this line", key=f"gen_{idx}_{line[:10]}"):
-                prompt = prompt_generate_line_notes(line, context_jd=jd_text)
-                messages = [{"role": "system", "content": "You are an interview coach."},
-                            {"role": "user", "content": prompt}]
-                out, _ = call_openrouter_chat(messages, max_tokens=700, temperature=0.0)
-                st.write(out)
-                st.markdown("---")
+            # questions
+            if isinstance(notes, dict) and notes.get("questions"):
+                st.markdown("**Generated Questions & Sample Answers**")
+                for qobj in notes.get("questions"):
+                    q = qobj.get("q")
+                    typ = qobj.get("type", "general")
+                    ans = qobj.get("sample_answer", "")
+                    with st.container():
+                        st.markdown(f"<div class='q-card'><strong>Q ({typ}):</strong> {q}</div>", unsafe_allow_html=True)
+                        with st.expander("Show sample answer"):
+                            st.write(ans)
+            else:
+                # fallback: offer to generate quick mock questions
+                if st.button("Generate quick Qs for this line", key=f"gen_{idx}_{line[:10]}"):
+                    prompt = prompt_generate_line_notes(line, context_jd=jd_text)
+                    messages = [{"role": "system", "content": "You are an interview coach."},
+                                {"role": "user", "content": prompt}]
+                    out, _ = call_openrouter_chat(messages, max_tokens=700, temperature=0.0)
+                    st.write(out)
+                    st.markdown("---")
 
-"""
-CHANGES MADE:
-1. Added enumerate(results) to get a unique 'idx' for each loop iteration.
-2. Modified st.button key to include 'idx' → `key=f"gen_{idx}_{line[:10]}"` so keys are always unique.
-3. This prevents Streamlit's 'DuplicateWidgetID' error when `line[:10]` repeats.
-"""
-
-               
     # Mock Interview (text-only)
 st.header("Mock Interview (text mode) — optional")
 st.markdown("This mock interview uses the same CV-focused knowledge generated above. It will NOT change the initial JD–CV assessment.")
@@ -446,16 +490,21 @@ if "mock_questions" not in st.session_state:
     st.session_state.mock_history = []
 
 if st.button("Generate Mock Interview Questions (8)"):
-    prompt = prompt_generate_mock_questions(cv_text, jd_text, n=8)
+    _cv_text = st.session_state.get("cv_text", "")
+    _jd_text = st.session_state.get("jd_text", "")
+    prompt = prompt_generate_mock_questions(_cv_text, _jd_text, n=8)
     messages = [{"role":"system","content":"You are an interviewer."},{"role":"user","content":prompt}]
     out, _ = call_openrouter_chat(messages, max_tokens=900, temperature=0.2)
-       
+    
     # try parse array
     try:
-        parsed = json.loads(out)
-        qs = [p.get("q") if isinstance(p, dict) else str(p) for p in parsed]
+        parsed = try_load_json(out)
+        if isinstance(parsed, list):
+            qs = [p.get("q") if isinstance(p, dict) else str(p) for p in parsed]
+        else:
+            raise ValueError("Not a list")
     except Exception:
-         # fallback: split lines
+        # fallback: split lines
         qs = [line.strip() for line in out.splitlines() if line.strip()][:8]
     st.session_state.mock_questions = qs
     st.session_state.mock_idx = 0
@@ -467,8 +516,9 @@ if st.session_state.mock_questions:
         st.markdown(f"**Q{idx+1}:** {st.session_state.mock_questions[idx]}")
         user_answer = st.text_area("Your answer (type here)", key=f"mock_ans_{idx}", height=160)
         if st.button("Get feedback on this answer"):
-                # feed LLM: provide initial assessment + line notes context for better feedback
-            context = {"initial_assessment": st.session_state.get("initial_assessment"), "top_lines": [r["line"] for r in results[:6]]}
+            # feed LLM: provide initial assessment + line notes context for better feedback
+            _top_results = st.session_state.get("analysis_results", [])
+            context = {"initial_assessment": st.session_state.get("initial_assessment"), "top_lines": [r["line"] for r in _top_results[:6]]}
             fb_prompt = textwrap.dedent(f"""
             You are an interviewer and feedback coach. Use the candidate context and initial assessment to give constructive feedback.
             Context (JSON): {json.dumps(context, indent=2)}
