@@ -100,6 +100,16 @@ if not OPENROUTER_API_KEY:
 
 OPENROUTER_CHAT_URL = "https://api.openrouter.ai/v1/chat/completions"
 MODEL_ID = "deepseek/deepseek-r1-0528:free"
+# Fallback/override base URL support
+OPENROUTER_BASE_URL = os.environ.get("OPENROUTER_BASE_URL")
+OPENROUTER_CHAT_URLS = []
+if OPENROUTER_BASE_URL:
+    base = OPENROUTER_BASE_URL[:-1] if OPENROUTER_BASE_URL.endswith("/") else OPENROUTER_BASE_URL
+    OPENROUTER_CHAT_URLS.append(f"{base}/v1/chat/completions")
+OPENROUTER_CHAT_URLS += [
+    "https://api.openrouter.ai/v1/chat/completions",
+    "https://openrouter.ai/api/v1/chat/completions",
+]
 
 # ---------------------------
 # Helper functions
@@ -155,7 +165,9 @@ def split_lines_and_sections(text: str) -> List[str]:
     return cleaned
 
 def call_openrouter_chat(messages: list, max_tokens=1200, temperature=0.0):
-    """Call OpenRouter chat completion endpoint with model and messages (OpenAI-compatible)."""
+    """Call OpenRouter chat completion endpoint with retries and fallback URLs.
+    Returns (content, meta). On network errors, content is "" and meta contains {"error": str}.
+    """
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json"
@@ -166,14 +178,22 @@ def call_openrouter_chat(messages: list, max_tokens=1200, temperature=0.0):
         "max_tokens": max_tokens,
         "temperature": temperature
     }
-    try:
-        r = requests.post(OPENROUTER_CHAT_URL, headers=headers, json=payload, timeout=60)
-        r.raise_for_status()
-        resp = r.json()
-        content = resp.get("choices", [{}])[0].get("message", {}).get("content", "")
-        return content, resp
-    except Exception as e:
-        return f"[ERROR] {e}", None
+    last_err = None
+    for url in OPENROUTER_CHAT_URLS:
+        for attempt in range(3):
+            try:
+                r = requests.post(url, headers=headers, json=payload, timeout=60)
+                r.raise_for_status()
+                resp = r.json()
+                content = resp.get("choices", [{}])[0].get("message", {}).get("content", "")
+                return content, resp
+            except Exception as e:
+                last_err = e
+                time.sleep(0.6 * (attempt + 1))
+        # try next URL
+        continue
+    # All attempts failed: return graceful meta error without noisy text
+    return "", {"error": f"OpenRouter unreachable: {str(last_err)}"}
 
 def ddg_search_snippets(query: str, max_results: int = 4):
     if ddg is None and _DDG_CLIENT is None:
@@ -242,6 +262,8 @@ def prompt_generate_line_notes(line: str, context_jd: str = "") -> str:
     - 'search_queries': list of 4 concise web search queries that would help learn more about this line
     Keep JSON compact and machine-parseable. Tailor answers to be profession-agnostic but adapt when domain cues exist. If JD is provided, align answers to JD: {bool(context_jd)}.
     """) + f"\nCV_LINE: {line}\nJD_CONTEXT: {context_jd}"
+
+# Restore missing prompt helpers
 
 def prompt_generate_assessment(cv_text: str, jd_text: str) -> str:
     return textwrap.dedent(f"""
@@ -343,12 +365,16 @@ if process_btn:
         ]
         out, raw = call_openrouter_chat(messages, max_tokens=900, temperature=0.0)
         # store immutable
-        try:
-            parsed = try_load_json(out)
-            st.session_state.initial_assessment = parsed
-        except Exception:
-            # fallback: keep raw text if JSON parse fails
-            st.session_state.initial_assessment = {"raw": out}
+        if isinstance(raw, dict) and raw.get("error"):
+            st.error("Cannot reach OpenRouter. Please check your Internet/DNS, or set OPENROUTER_BASE_URL / proxy env. Skipping assessment.")
+            st.session_state.initial_assessment = None
+        else:
+            try:
+                parsed = try_load_json(out)
+                st.session_state.initial_assessment = parsed
+            except Exception:
+                # fallback: keep raw text if JSON parse fails
+                st.session_state.initial_assessment = {"raw": out}
         st.success("Initial assessment saved (won't be changed by mock interview).")
     else:
         st.info("No JD provided or CV-only mode: skipping JD–CV assessment.")
@@ -390,10 +416,13 @@ if process_btn:
 
         out, raw = call_openrouter_chat(messages, max_tokens=1400, temperature=temperature)
         # try parse JSON; if fails, return raw wrapped
-        try:
-            parsed = try_load_json(out)
-        except Exception:
-            parsed = {"line": line, "raw": out, "sources": snippets}
+        if isinstance(raw, dict) and raw.get("error"):
+            parsed = {"line": line, "error": "Service temporarily unavailable. Please retry.", "sources": snippets}
+        else:
+            try:
+                parsed = try_load_json(out)
+            except Exception:
+                parsed = {"line": line, "raw": out, "sources": snippets}
 
         results.append({"line": line, "notes": parsed, "snippets": snippets})
         progress.progress(int(i/total*100))
@@ -446,6 +475,8 @@ if "analysis_results" in st.session_state:
             elif isinstance(notes, dict) and notes.get("raw"):
                 st.markdown("**Raw model output:**")
                 st.write(notes.get("raw"))
+            elif isinstance(notes, dict) and notes.get("error"):
+                st.warning(notes.get("error"))
             else:
                 st.write(notes)
 
@@ -477,8 +508,11 @@ if "analysis_results" in st.session_state:
                     prompt = prompt_generate_line_notes(line, context_jd=jd_text)
                     messages = [{"role": "system", "content": "You are an interview coach."},
                                 {"role": "user", "content": prompt}]
-                    out, _ = call_openrouter_chat(messages, max_tokens=700, temperature=0.0)
-                    st.write(out)
+                    out, meta = call_openrouter_chat(messages, max_tokens=700, temperature=0.0)
+                    if isinstance(meta, dict) and meta.get("error"):
+                        st.error("Service temporarily unavailable. Please check connectivity and try again.")
+                    else:
+                        st.write(out)
                     st.markdown("---")
 
     # Mock Interview (text-only)
@@ -494,7 +528,10 @@ if st.button("Generate Mock Interview Questions (8)"):
     _jd_text = st.session_state.get("jd_text", "")
     prompt = prompt_generate_mock_questions(_cv_text, _jd_text, n=8)
     messages = [{"role":"system","content":"You are an interviewer."},{"role":"user","content":prompt}]
-    out, _ = call_openrouter_chat(messages, max_tokens=900, temperature=0.2)
+    out, meta = call_openrouter_chat(messages, max_tokens=900, temperature=0.2)
+    if isinstance(meta, dict) and meta.get("error"):
+        st.error("Service temporarily unavailable. Please check connectivity and try again.")
+        st.stop()
     
     # try parse array
     try:
