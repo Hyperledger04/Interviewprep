@@ -383,8 +383,8 @@ if "analysis_results" in st.session_state:
     st.header("Line-by-line Preparation (CV-focused)")
     # show each line card with QnA, sample answers and web notes
     for idx, item in enumerate(results):  # ✅ Added enumerate to create a unique index for each loop
-    notes = item["notes"]
-    line = item["line"]
+        notes = item["notes"]
+        line = item["line"]
     # card
     with st.expander(f"🔎 {line}", expanded=False):
         if isinstance(notes, dict) and notes.get("short_summary"):
