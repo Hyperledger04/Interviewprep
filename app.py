@@ -7,8 +7,9 @@ import requests
 import re
 
 # Load environment variables
-load_dotenv()
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+OPENROUTER_API_KEY = (
+    st.secrets.get("OPENROUTER_API_KEY") or os.getenv("OPENROUTER_API_KEY")
+)
 if not OPENROUTER_API_KEY:
     st.error("❌ No API key found in .env. Please add OPENROUTER_API_KEY.")
     st.stop()
