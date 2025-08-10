@@ -32,7 +32,7 @@ npm run dev
 ## Configuration
 
 - LLM_BASE_URL: default `https://openrouter.ai/api/v1` (works with DeepSeek R1 via OpenRouter)
-- LLM_MODEL: default `deepseek/deepseek-r1:free`
+- LLM_MODEL: default `deepseek/deepseek-r1-0528:free`
 - Alternative DeepSeek official: set `LLM_BASE_URL=https://api.deepseek.com/v1` and `LLM_MODEL=deepseek-reasoner`
 
 You can provide API keys either server-side via `.env.local` or client-side in Settings (stored in `localStorage`). Requests forward the `x-api-key` header.

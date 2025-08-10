@@ -7,7 +7,7 @@ Requirements
 
 Environment variables (optional if you paste API key in Settings):
 - LLM_BASE_URL (default: https://openrouter.ai/api/v1)
-- LLM_MODEL (default: deepseek/deepseek-r1:free)
+- LLM_MODEL (default: deepseek/deepseek-r1-0528:free)
 - OPENROUTER_API_KEY or DEEPSEEK_API_KEY
 
 Steps to run:

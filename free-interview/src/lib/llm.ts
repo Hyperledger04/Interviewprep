@@ -32,7 +32,7 @@ export function resolveBaseUrl(): string {
 }
 
 export function resolveModel(): string {
-  return process.env.LLM_MODEL || 'deepseek/deepseek-r1:free';
+  return process.env.LLM_MODEL || 'deepseek/deepseek-r1-0528:free';
 }
 
 export async function llmChat(
