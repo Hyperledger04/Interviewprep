@@ -1,0 +1,20 @@
+## Requirements
+
+- Node.js: >= 18.18.0 (recommended 20.x)
+- npm: >= 10.x
+- OS: macOS, Linux, or Windows (WSL recommended on Windows)
+- Browser: Chrome/Edge recommended for STT (webkitSpeechRecognition)
+
+Environment variables (optional if you paste API key in Settings):
+- LLM_BASE_URL (default: `https://openrouter.ai/api/v1`)
+- LLM_MODEL (default: `deepseek/deepseek-r1:free`)
+- OPENROUTER_API_KEY or DEEPSEEK_API_KEY
+
+Steps to run:
+- Install dependencies: `npm install`
+- Start dev server: `npm run dev`
+- Open: `http://localhost:3000`
+
+Notes:
+- For DeepSeek official API, set `LLM_BASE_URL=https://api.deepseek.com/v1` and `LLM_MODEL=deepseek-reasoner`.
+- PDF/DOCX parsing runs server-side; ensure your environment allows native modules where needed.
